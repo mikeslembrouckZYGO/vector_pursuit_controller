@@ -827,25 +827,30 @@ bool VectorPursuitController::inCollision(
 {
   unsigned int mx, my;
 
-  if (!costmap_->worldToMap(x, y, mx, my)) {
-    RCLCPP_WARN_THROTTLE(
-      logger_, *(clock_), 30000,
-      "The dimensions of the costmap is too small to successfully check for "
-      "collisions as far ahead as requested. Proceed at your own risk, slow the robot, or "
-      "increase your costmap size.");
-    return false;
-  }
+    if (!costmap_->worldToMap(x, y, mx, my)) {
+        RCLCPP_WARN_THROTTLE(logger_,
+            *(clock_),
+            30000,
+            "The dimensions of the costmap is too small to successfully check for "
+            "collisions as far ahead as requested. Proceed at your own risk, slow the robot, or "
+            "increase your costmap size.");
+        return false;
+    }
 
-  auto fp = costmap_ros_->getRobotFootprint();
-  for (auto& p : fp) {
-      if (p.x < 0.0) {
-          p.x = 0.0;
-      }
-  }
+    auto fp = costmap_ros_->getRobotFootprint();
+    if (!allow_reversing_) {
+        // remove negative x values from footprint, (naive approach)
+        // to avoid getting stuck on collision at the backside
+        for (auto& p : fp) {
+            if (p.x < 0.0) {
+                p.x = 0.0;
+            }
+        }
+    }
 
-  double footprint_cost = collision_checker_->footprintCostAtPose(
-    x, y, theta, fp);
-  if (footprint_cost == static_cast<double>(nav2_costmap_2d::NO_INFORMATION) &&
+    double footprint_cost = collision_checker_->footprintCostAtPose(x, y, theta, fp);
+
+    if (footprint_cost == static_cast<double>(nav2_costmap_2d::NO_INFORMATION) &&
     costmap_ros_->getLayeredCostmap()->isTrackingUnknown())
   {
     RCLCPP_WARN(logger_, "Footprint cost is unknown, collision check failed");
