@@ -106,6 +106,8 @@ void VectorPursuitController::configure(
   declare_parameter_if_not_declared(
     node, plugin_name_ + ".rotate_to_heading_min_angle", rclcpp::ParameterValue(0.785));
   declare_parameter_if_not_declared(
+    node, plugin_name_ + ".rotate_to_heading_max_linear_vel", rclcpp::ParameterValue(-1.0));
+  declare_parameter_if_not_declared(
     node, plugin_name_ + ".rotate_to_heading_angular_vel", rclcpp::ParameterValue(1.8));
   declare_parameter_if_not_declared(
     node, plugin_name_ + ".max_angular_accel", rclcpp::ParameterValue(3.2));
@@ -164,6 +166,8 @@ void VectorPursuitController::configure(
     inflation_cost_scaling_factor_);
   node->get_parameter(plugin_name_ + ".use_rotate_to_heading", use_rotate_to_heading_);
   node->get_parameter(plugin_name_ + ".rotate_to_heading_min_angle", rotate_to_heading_min_angle_);
+  node->get_parameter(
+    plugin_name_ + ".rotate_to_heading_max_linear_vel", rotate_to_heading_max_linear_vel_);
   node->get_parameter(plugin_name_ + ".max_angular_accel", max_angular_accel_);
   node->get_parameter(plugin_name_ + ".max_linear_accel", max_linear_accel_);
   node->get_parameter(plugin_name_ + ".max_lateral_accel", max_lateral_accel_);
@@ -354,7 +358,7 @@ geometry_msgs::msg::TwistStamped VectorPursuitController::computeVelocityCommand
     double angle_to_goal = tf2::getYaw(transformed_plan.poses.back().pose.orientation);
     rotateToHeading(linear_vel, angular_vel, angle_to_goal, last_cmd_vel_);
     applyAngularBraking(angular_vel, angle_to_goal, last_cmd_vel_);
-  } else if (shouldRotateToPath(lookahead_point, angle_to_heading, sign)) {
+  } else if (shouldRotateToPath(lookahead_point, angle_to_heading, sign, last_cmd_vel_.linear.x)) {
     rotateToHeading(linear_vel, angular_vel, angle_to_heading, last_cmd_vel_);
   } else {
     double turning_radius = calcTurningRadius(lookahead_point);
@@ -490,7 +494,7 @@ void VectorPursuitController::applyConstraints(
 
 bool VectorPursuitController::shouldRotateToPath(
   const geometry_msgs::msg::PoseStamped & target_pose,
-  double & angle_to_path, double & sign)
+  double & angle_to_path, double & sign, const double & linear_vel)
 {
   // Whether we should rotate robot to rough path heading
   angle_to_path = atan2(target_pose.pose.position.y, target_pose.pose.position.x);
@@ -500,7 +504,9 @@ bool VectorPursuitController::shouldRotateToPath(
     angle_to_path = angles::normalize_angle(angle_to_path + M_PI);
   }
 
-  return use_rotate_to_heading_ && std::abs(angle_to_path) > rotate_to_heading_min_angle_;
+  return use_rotate_to_heading_ &&
+         std::abs(angle_to_path) > rotate_to_heading_min_angle_ &&
+         (rotate_to_heading_max_linear_vel_ < 0.0 || std::abs(linear_vel) <= rotate_to_heading_max_linear_vel_);
 }
 
 bool VectorPursuitController::shouldRotateToGoalHeading(
@@ -1005,6 +1011,8 @@ rcl_interfaces::msg::SetParametersResult VectorPursuitController::dynamicParamet
         max_angular_accel_ = parameter.as_double();
       } else if (name == plugin_name_ + ".rotate_to_heading_min_angle") {
         rotate_to_heading_min_angle_ = parameter.as_double();
+      } else if (name == plugin_name_ + ".rotate_to_heading_max_linear_vel") {
+        rotate_to_heading_max_linear_vel_ = parameter.as_double();
       } else if (name == plugin_name_ + ".k") {
         k_ = parameter.as_double();
       } else if (name == plugin_name_ + ".approach_velocity_scaling_dist") {

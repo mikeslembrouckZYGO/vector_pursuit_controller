@@ -69,6 +69,7 @@ controller_server:
       use_rotate_to_heading: true
       allow_reversing: false
       rotate_to_heading_min_angle: 0.5
+      rotate_to_heading_max_linear_vel: 1.0e308
       max_angular_accel: 3.0
       max_linear_accel: 2.0
       max_lateral_accel: 0.2

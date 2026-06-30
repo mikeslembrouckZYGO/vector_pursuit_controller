@@ -51,6 +51,8 @@ public:
   double getMinTurningRadius() {return min_turning_radius_;}
   void setMinTurningRadius(double r) {min_turning_radius_ = r;}
 
+  void setRotateToHeadingMaxLinearVel(double v) {rotate_to_heading_max_linear_vel_ = v;}
+
   void setVelocityScaledLookAhead() {use_velocity_scaled_lookahead_dist_ = true;}
   void setCostRegulationScaling() {use_cost_regulated_linear_velocity_scaling_ = true;}
 
@@ -79,9 +81,10 @@ public:
   }
 
   bool shouldRotateToPathWrapper(
-    const geometry_msgs::msg::PoseStamped & target_pose, double & angle_to_path, double & sign)
+    const geometry_msgs::msg::PoseStamped & target_pose, double & angle_to_path,
+    double & sign, const double & linear_vel)
   {
-    return shouldRotateToPath(target_pose, angle_to_path, sign);
+    return shouldRotateToPath(target_pose, angle_to_path, sign, linear_vel);
   }
 
   void rotateToHeadingWrapper(
@@ -456,16 +459,22 @@ TEST(VectorPursuitTest, rotateTests)
   geometry_msgs::msg::PoseStamped carrot;
   double angle_to_path_rtn;
   double sign = 1.0;
+  const double current_speed = 0.5;
 
-  EXPECT_EQ(ctrl->shouldRotateToPathWrapper(carrot, angle_to_path_rtn, sign), false);
+  EXPECT_EQ(ctrl->shouldRotateToPathWrapper(carrot, angle_to_path_rtn, sign, current_speed), false);
 
   carrot.pose.position.x = 0.5;
   carrot.pose.position.y = 0.25;
-  EXPECT_EQ(ctrl->shouldRotateToPathWrapper(carrot, angle_to_path_rtn, sign), false);
+  EXPECT_EQ(ctrl->shouldRotateToPathWrapper(carrot, angle_to_path_rtn, sign, current_speed), false);
 
   carrot.pose.position.x = 0.5;
   carrot.pose.position.y = 1.0;
-  EXPECT_EQ(ctrl->shouldRotateToPathWrapper(carrot, angle_to_path_rtn, sign), true);
+  EXPECT_EQ(ctrl->shouldRotateToPathWrapper(carrot, angle_to_path_rtn, sign, current_speed), true);
+
+  // Current speed above threshold should suppress rotation even with a large angle
+  EXPECT_EQ(
+    ctrl->shouldRotateToPathWrapper(carrot, angle_to_path_rtn, sign, 0.0), true)
+    << "Should rotate to path when current speed is below the threshold (robot nearly stopped)";
 
   // rotateToHeading
   double lin_v = 10.0;
@@ -499,6 +508,55 @@ TEST(VectorPursuitTest, rotateTests)
   curr_speed.angular.z = 1.0;
   ctrl->rotateToHeadingWrapper(lin_v, ang_v, angle_to_path, curr_speed);
   EXPECT_NEAR(ang_v, 0.84, 0.01);
+}
+
+TEST(VectorPursuitTest, shouldRotateToPathVelocityThreshold)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("testVP_vel_threshold");
+  std::string name = "PathFollower";
+  auto tf = std::make_shared<tf2_ros::Buffer>(node->get_clock());
+  auto costmap = std::make_shared<nav2_costmap_2d::Costmap2DROS>("fake_costmap");
+  rclcpp_lifecycle::State state;
+  costmap->on_configure(state);
+
+  nav2_util::declare_parameter_if_not_declared(
+    node, name + ".rotate_to_heading_max_linear_vel", rclcpp::ParameterValue(0.3));
+
+  auto ctrl = std::make_shared<Controller>();
+  ctrl->configure(node, name, tf, costmap);
+
+  // Carrot with large enough angle to trigger rotation
+  geometry_msgs::msg::PoseStamped carrot;
+  carrot.pose.position.x = 0.5;
+  carrot.pose.position.y = 1.0;
+  double angle_to_path_rtn;
+  double sign = 1.0;
+
+  // Given
+  // When current speed is below threshold
+  // Then should rotate
+  EXPECT_EQ(ctrl->shouldRotateToPathWrapper(carrot, angle_to_path_rtn, sign, 0.1), true)
+    << "Should rotate to path when current speed is below the threshold";
+
+  // Given
+  // When current speed is above threshold
+  // Then should not rotate
+  EXPECT_EQ(ctrl->shouldRotateToPathWrapper(carrot, angle_to_path_rtn, sign, 0.5), false)
+    << "Should not rotate to path when current speed exceeds the threshold";
+
+  // Given
+  // When current speed equals threshold exactly
+  // Then should rotate (threshold is inclusive)
+  EXPECT_EQ(ctrl->shouldRotateToPathWrapper(carrot, angle_to_path_rtn, sign, 0.3), true)
+    << "Should rotate to path when current speed equals the threshold";
+
+  // Given threshold is negative
+  // When any current speed
+  // Then should always rotate (negative threshold disables the check)
+  EXPECT_EQ(ctrl->shouldRotateToPathWrapper(carrot, angle_to_path_rtn, sign, 1000.0), false);
+  ctrl->setRotateToHeadingMaxLinearVel(-1.0);
+  EXPECT_EQ(ctrl->shouldRotateToPathWrapper(carrot, angle_to_path_rtn, sign, 1000.0), true)
+    << "Should always rotate to path when max_linear_vel threshold is negative";
 }
 
 TEST(VectorPursuitTest, applyConstraints)

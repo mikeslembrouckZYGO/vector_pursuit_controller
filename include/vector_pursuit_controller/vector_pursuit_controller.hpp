@@ -260,7 +260,7 @@ protected:
    */
   bool shouldRotateToPath(
     const geometry_msgs::msg::PoseStamped & target_pose,
-    double & angle_to_path, double & sign);
+    double & angle_to_path, double & sign, const double & linear_vel);
 
   /**
    * @brief Whether robot should rotate to final goal orientation
@@ -342,6 +342,7 @@ protected:
   double max_angular_accel_;
   double max_linear_accel_;
   double rotate_to_heading_min_angle_;
+  double rotate_to_heading_max_linear_vel_;
   double goal_dist_tol_;
   double max_robot_pose_search_dist_;
   bool use_interpolation_;
