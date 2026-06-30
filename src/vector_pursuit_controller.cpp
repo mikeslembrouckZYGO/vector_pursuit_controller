@@ -836,8 +836,15 @@ bool VectorPursuitController::inCollision(
     return false;
   }
 
+  auto fp = costmap_ros_->getRobotFootprint();
+  for (auto& p : fp) {
+      if (p.x < 0.0) {
+          p.x = 0.0;
+      }
+  }
+
   double footprint_cost = collision_checker_->footprintCostAtPose(
-    x, y, theta, costmap_ros_->getRobotFootprint());
+    x, y, theta, fp);
   if (footprint_cost == static_cast<double>(nav2_costmap_2d::NO_INFORMATION) &&
     costmap_ros_->getLayeredCostmap()->isTrackingUnknown())
   {
