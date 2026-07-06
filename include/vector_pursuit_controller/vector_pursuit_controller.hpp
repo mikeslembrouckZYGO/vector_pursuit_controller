@@ -17,6 +17,7 @@
 #ifndef VECTOR_PURSUIT_CONTROLLER__VECTOR_PURSUIT_CONTROLLER_HPP_
 #define VECTOR_PURSUIT_CONTROLLER__VECTOR_PURSUIT_CONTROLLER_HPP_
 
+#include <deque>
 #include <string>
 #include <vector>
 #include <memory>
@@ -186,7 +187,8 @@ protected:
   bool inCollision(
     const double & x,
     const double & y,
-    const double & theta);
+    const double & theta,
+    bool is_reversing);
 
   /**
    * @brief Whether collision is imminent
@@ -303,6 +305,12 @@ protected:
   double getCostmapMaxExtent() const;
 
   /**
+   * @brief Calculate the averaged robot speed from pose history
+   * @return Averaged robot speed as a Twist message
+   */
+  geometry_msgs::msg::Twist calcAveragedRobotSpeed() const;
+
+  /**
    * @brief Callback executed when a parameter change is detected
    * @param event ParameterEvent message
    */
@@ -349,8 +357,10 @@ protected:
   bool allow_reversing_;
   bool is_reversing_;
   bool use_heading_from_path_;
+  double pose_speed_history_time_;
 
   geometry_msgs::msg::Twist last_cmd_vel_;
+  std::deque<geometry_msgs::msg::PoseStamped> pose_history_;
 
   nav_msgs::msg::Path global_plan_;
   std::shared_ptr<rclcpp_lifecycle::LifecyclePublisher<nav_msgs::msg::Path>> global_path_pub_;

@@ -124,6 +124,7 @@ void VectorPursuitController::configure(
   declare_parameter_if_not_declared(
     node, plugin_name_ + ".use_heading_from_path",
     rclcpp::ParameterValue(true));
+  declare_parameter_if_not_declared(node, plugin_name_ + ".pose_speed_history_time", rclcpp::ParameterValue(0.5));
 
   node->get_parameter(plugin_name_ + ".k", k_);
   node->get_parameter(plugin_name_ + ".desired_linear_vel", desired_linear_vel_);
@@ -181,6 +182,7 @@ void VectorPursuitController::configure(
   node->get_parameter(
     plugin_name_ + ".use_heading_from_path",
     use_heading_from_path_);
+  node->get_parameter(plugin_name_ + ".pose_speed_history_time", pose_speed_history_time_);
 
   transform_tolerance_ = tf2::durationFromSec(transform_tolerance);
   control_duration_ = 1.0 / control_frequency;
@@ -315,6 +317,13 @@ geometry_msgs::msg::TwistStamped VectorPursuitController::computeVelocityCommand
   nav2_costmap_2d::Costmap2D * costmap = costmap_ros_->getCostmap();
   std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> lock(*(costmap->getMutex()));
 
+  pose_history_.push_back(pose);
+  const auto cutoff_time = rclcpp::Time(pose.header.stamp) - rclcpp::Duration::from_seconds(pose_speed_history_time_);
+  while (!pose_history_.empty() && rclcpp::Time(pose_history_.front().header.stamp) < cutoff_time) {
+      pose_history_.pop_front();
+  }
+  const auto robot_speed = calcAveragedRobotSpeed();
+
   // Update goal tolerances
   geometry_msgs::msg::Pose pose_tolerance;
   geometry_msgs::msg::Twist vel_tolerance;
@@ -328,20 +337,30 @@ geometry_msgs::msg::TwistStamped VectorPursuitController::computeVelocityCommand
   auto transformed_plan = transformGlobalPlan(pose);
 
   // Find look ahead distance and point on path
-  double lookahead_dist = getLookAheadDistance(last_cmd_vel_);
+  double lookahead_dist = getLookAheadDistance(robot_speed);
 
-  // Cusp check
-  const double dist_to_cusp = getCuspDist(transformed_plan);
-
-  // if the lookahead distance is further than the cusp, use the cusp distance instead
-  if (dist_to_cusp < lookahead_dist) {
-    lookahead_dist = dist_to_cusp;
-  }
+  // // Cusp check
+  // const double dist_to_cusp = getCuspDist(transformed_plan);
+  //
+  // // if the lookahead distance is further than the cusp, use the cusp distance instead
+  // if (dist_to_cusp < lookahead_dist) {
+  //   lookahead_dist = dist_to_cusp;
+  // }
 
   auto lookahead_point = getLookAheadPoint(lookahead_dist, transformed_plan);
 
   // Publish target point for visualization
   target_pub_->publish(lookahead_point);
+
+  geometry_msgs::msg::PoseStamped robot_pose;
+  if (!transformPose(global_plan_.header.frame_id, pose, robot_pose)) {
+      throw nav2_core::PlannerException("Unable to transform robot pose into global plan's frame");
+  }
+
+  double vector_x = lookahead_point.pose.position.x - robot_pose.pose.position.x;
+  double vector_y = lookahead_point.pose.position.y - robot_pose.pose.position.y;
+  double vector_length = std::hypot(vector_x, vector_y);
+  RCLCPP_DEBUG(logger_, "Vector from robot to lookahead point - x: %f, y: %f, length: %f", vector_x, vector_y, vector_length);
 
   // Setting the velocity direction
   double sign = 1.0;
@@ -349,33 +368,54 @@ geometry_msgs::msg::TwistStamped VectorPursuitController::computeVelocityCommand
     sign = lookahead_point.pose.position.x >= 0.0 ? 1.0 : -1.0;
   }
 
-  double linear_vel, angular_vel;
+  double linear_vel = 0, angular_vel = 0;
 
   linear_vel = desired_linear_vel_;
+  double turning_radius = calcTurningRadius(lookahead_point);
 
-  double angle_to_heading;
+  // Compute linear velocity based on path curvature
+  double curvature = 1.0 / turning_radius;
+
+  double angle_to_heading = 0;
   if (shouldRotateToGoalHeading(lookahead_point)) {
     double angle_to_goal = tf2::getYaw(transformed_plan.poses.back().pose.orientation);
     rotateToHeading(linear_vel, angular_vel, angle_to_goal, last_cmd_vel_);
     applyAngularBraking(angular_vel, angle_to_goal, last_cmd_vel_);
-  } else if (shouldRotateToPath(lookahead_point, angle_to_heading, sign, last_cmd_vel_.linear.x)) {
-    rotateToHeading(linear_vel, angular_vel, angle_to_heading, last_cmd_vel_);
+  } else if (shouldRotateToPath(lookahead_point, angle_to_heading, sign, robot_speed.linear.x)) {
+      RCLCPP_DEBUG(logger_, "Rotating to path with angle: %f deg, robot_speed_x: %f", angles::to_degrees(angle_to_heading), robot_speed.linear.x);
+      rotateToHeading(linear_vel, angular_vel, angle_to_heading, last_cmd_vel_);
   } else {
-    double turning_radius = calcTurningRadius(lookahead_point);
+      RCLCPP_DEBUG(logger_,
+          "Rejected rotate to path params - use_rotate_to_heading: %d, angle_to_path: %f deg, "
+          "rotate_to_heading_min_angle: %f deg, rotate_to_heading_max_linear_vel: %f, "
+          "robot_speed_x: %f",
+          use_rotate_to_heading_,
+          angles::to_degrees(angle_to_heading),
+          angles::to_degrees(rotate_to_heading_min_angle_),
+          rotate_to_heading_max_linear_vel_,
+          robot_speed.linear.x);
+      applyConstraints(curvature, last_cmd_vel_, costAtPose(pose.pose.position.x, pose.pose.position.y), linear_vel, transformed_plan, sign);
 
-    // Compute linear velocity based on path curvature
-    double curvature = 1.0 / turning_radius;
-
-    applyConstraints(
-      curvature, last_cmd_vel_,
-      costAtPose(pose.pose.position.x, pose.pose.position.y), linear_vel, transformed_plan, sign);
-
-    // Compute angular velocity
-    angular_vel = linear_vel / turning_radius;
-    if (lookahead_point.pose.position.y < 0) {
-      angular_vel *= -1;
-    }
+      // Compute angular velocity
+      angular_vel = linear_vel / turning_radius;
+      if (lookahead_point.pose.position.y < 0) {
+          angular_vel *= -1;
+      }
   }
+  // Calculate distance to lookahead point
+  const double target_dist_local = std::hypot(lookahead_point.pose.position.x, lookahead_point.pose.position.y);
+
+  RCLCPP_INFO(logger_,
+      "linear_vel: %f, angular_vel: %f, angle_to_heading: %f, last_cmd_lin_x: %f, "
+      "last_cmd_ang_z: %f, distance_to_lookahead: %f, curvature: %f, turning_radius: %f",
+      linear_vel,
+      angular_vel,
+      angle_to_heading,
+      last_cmd_vel_.linear.x,
+      last_cmd_vel_.angular.z,
+      target_dist_local,
+      curvature,
+      turning_radius);
 
   // Collision checking
   const double target_dist = std::hypot(
@@ -490,6 +530,31 @@ void VectorPursuitController::applyConstraints(
   // Ensure the linear velocity is not below the minimum allowed linear velocity
   linear_vel = std::max(linear_vel, min_linear_velocity_);
   linear_vel = sign * linear_vel;
+}
+
+geometry_msgs::msg::Twist VectorPursuitController::calcAveragedRobotSpeed() const
+{
+    geometry_msgs::msg::Twist speed;
+    if (pose_history_.size() < 2) {
+        return speed;
+    }
+
+    double total_speed = 0.0;
+    size_t num_samples = 0;
+    for (size_t i = 1; i < pose_history_.size(); ++i) {
+        const auto& p_prev = pose_history_[i - 1];
+        const auto& p_curr = pose_history_[i];
+        const double dt = rclcpp::Time(p_curr.header.stamp).seconds() - rclcpp::Time(p_prev.header.stamp).seconds();
+        if (dt <= 0.0) {
+            continue;
+        }
+
+        total_speed += euclidean_distance(p_prev, p_curr) / dt;
+        ++num_samples;
+    }
+
+    speed.linear.x = num_samples > 0 ? total_speed / static_cast<double>(num_samples) : 0.0;
+    return speed;
 }
 
 bool VectorPursuitController::shouldRotateToPath(
@@ -702,12 +767,9 @@ bool VectorPursuitController::isCollisionImminent(
   // odom frame and the target_pose is in robot base frame.
 
   // check current point is OK
-  if (inCollision(
-      robot_pose.pose.position.x, robot_pose.pose.position.y,
-      tf2::getYaw(robot_pose.pose.orientation)))
-  {
-    RCLCPP_WARN(logger_, "Robot is in collision at current pose");
-    return true;
+  if (inCollision(robot_pose.pose.position.x, robot_pose.pose.position.y, tf2::getYaw(robot_pose.pose.orientation), linear_vel < 0.0)) {
+      RCLCPP_WARN(logger_, "Robot is in collision at current pose");
+      return true;
   }
 
   // visualization messages
@@ -762,9 +824,9 @@ bool VectorPursuitController::isCollisionImminent(
     arc_pts_msg.poses.push_back(pose_msg);
 
     // check for collision at the projected pose
-    if (inCollision(curr_pose.x, curr_pose.y, curr_pose.theta)) {
-      target_arc_pub_->publish(arc_pts_msg);
-      return true;
+    if (inCollision(curr_pose.x, curr_pose.y, curr_pose.theta, linear_vel < 0.0)) {
+        target_arc_pub_->publish(arc_pts_msg);
+        return true;
     }
   }
 
@@ -820,12 +882,9 @@ double VectorPursuitController::getCuspDist(
   return std::numeric_limits<double>::max();
 }
 
-bool VectorPursuitController::inCollision(
-  const double & x,
-  const double & y,
-  const double & theta)
+bool VectorPursuitController::inCollision(const double& x, const double& y, const double& theta, bool is_reversing)
 {
-  unsigned int mx, my;
+    unsigned int mx, my;
 
     if (!costmap_->worldToMap(x, y, mx, my)) {
         RCLCPP_WARN_THROTTLE(logger_,
@@ -838,7 +897,15 @@ bool VectorPursuitController::inCollision(
     }
 
     auto fp = costmap_ros_->getRobotFootprint();
-    if (!allow_reversing_) {
+    if (allow_reversing_) {
+        if (is_reversing) {
+            for (auto& p : fp) {
+                if (p.x > 0.0) {
+                    p.x = 0.0;
+                }
+            }
+        }
+    } else {
         // remove negative x values from footprint, (naive approach)
         // to avoid getting stuck on collision at the backside
         for (auto& p : fp) {
